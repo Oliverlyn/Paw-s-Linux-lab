@@ -1,0 +1,123 @@
+diff -urN gcc-4.1.2-old/gcc/final.c gcc-4.1.2/gcc/final.c
+--- gcc-4.1.2-old/gcc/final.c	2005-12-20 12:51:27.000000000 +0800
++++ gcc-4.1.2/gcc/final.c	2013-11-23 12:59:35.000000000 +0800
+@@ -77,6 +77,9 @@
+ #include "cgraph.h"
+ #include "coverage.h"
+ 
++#include <sys/types.h>
++#include <regex.h>
++
+ #ifdef XCOFF_DEBUGGING_INFO
+ #include "xcoffout.h"		/* Needed for external data
+ 				   declarations for e.g. AIX 4.x.  */
+@@ -1541,12 +1544,82 @@
+ /* Output assembler code for some insns: all or part of a function.
+    For description of args, see `final_start_function', above.  */
+ 
++#define IS_PUSH !regexec(&my_reg[0], buf, 0, NULL, 0)
++#define IS_MOV !regexec(&my_reg[1], buf, 0, NULL, 0)
++#define IS_RET !regexec(&my_reg[3], buf, 0, NULL, 0)
++#define IS_SUB !regexec(&my_reg[2], buf, 0, NULL, 0)
++
++rtx
++my_final_scan_insn (rtx insn, FILE *file, int optimize ATTRIBUTE_UNUSED,
++		 int nopeepholes ATTRIBUTE_UNUSED, int *seen,
++		long *my_pos, int *my_status, regex_t my_reg[])
++{
++	rtx _i;
++	char buf[30];
++	int len;
++	_i = final_scan_insn (insn, file, optimize, 0, seen);
++	len = ftell(file) - *my_pos;
++	if(len < 4 || len > 30)
++		goto out;
++	fseek(file,-len,SEEK_CUR);
++	fread(buf,len,1,file);
++	buf[len-1] = '\0';
++	switch(*my_status)
++	{
++	case 0:
++		if(IS_PUSH)
++			*my_status = 1;
++		break;
++	case 1:
++		if(IS_RET)
++			*my_status = 0;
++		else if(IS_MOV)
++			*my_status = 2;
++		break;
++	case 2:
++		if(IS_RET)
++			*my_status = 0;
++		else if(IS_SUB)
++		{
++			*my_status = 3;
++			fseek(file,-len,SEEK_CUR);
++			fputs("\tmov\t%esp, %eax\n",file);
++			fprintf(file,"%s\n",buf);
++			fprintf(file,"my_sub_%d:\n",*my_pos);
++			fputs("\tsub\t$0x04, %eax\n",file);
++			fputs("\tcmp\t%eax, %esp\n",file);
++			fprintf(file,"\tjg\tmy_end_%d\n",*my_pos);
++			fputs("\tmovl\t$0x00, (%eax)\n",file);
++			fprintf(file,"\tjmp\tmy_sub_%d\n",*my_pos);
++			fprintf(file,"my_end_%d:\n",*my_pos);
++		}
++		break;
++	case 3:
++		if(IS_RET)
++			*my_status = 0;
++		break;
++	}
++out:
++	*my_pos = ftell(file);
++	return _i;
++}
++
+ void
+ final (rtx first, FILE *file, int optimize)
+ {
+   rtx insn;
+   int max_uid = 0;
+   int seen = 0;
++  long my_pos;
++  int my_status;
++  regex_t my_reg[4];
++  const char * my_RegexStr[] =
++  {
++	"^[ \t]*(pushl|push)[ \t]*(%ebp).*",
++	"^[ \t]*(movl|mov)[ \t]*(%esp)[ \t]*,[ \t]*(%ebp).*",
++	"^[ \t]*(subl|sub)[ \t]*\\$[0-9]{1,10}[ \t]*,[ \t]*(%esp).*",
++	"^[ \t]*(ret).*"
++  };
+ 
+   last_ignored_compare = 0;
+ 
+@@ -1600,6 +1673,11 @@
+   CC_STATUS_INIT;
+ 
+   /* Output the insns.  */
++  my_pos = ftell(file);
++  my_status = 4;
++  while(my_status -- )
++	  regcomp(&my_reg[my_status],my_RegexStr[my_status],REG_EXTENDED);
++  my_status = 0;
+   for (insn = NEXT_INSN (first); insn;)
+     {
+ #ifdef HAVE_ATTR_length
+@@ -1613,9 +1691,12 @@
+       else
+ 	insn_current_address = INSN_ADDRESSES (INSN_UID (insn));
+ #endif /* HAVE_ATTR_length */
+-
+-      insn = final_scan_insn (insn, file, optimize, 0, &seen);
++      
++      insn = my_final_scan_insn (insn, file, optimize, 0, &seen, &my_pos, &my_status, my_reg);
+     }
++  my_status = 4;
++  while(my_status -- )
++	  regfree(&my_reg[my_status]);
+ }
+ 
+ const char *
